@@ -37,6 +37,15 @@
 
 #include <uuid/uuid.h>
 
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
+#include <fcntl.h>
+#include <dirent.h>
+#include <sys/stat.h>
+#include <sys/types.h>
+
 /*
 extern "C" MySQL_LDAP_Authentication * create_MySQL_LDAP_Authentication_func() {
 	return NULL;
@@ -1315,7 +1324,82 @@ namespace {
 	static const bool SET_TERMINATE = std::set_terminate(my_terminate);
 }
 
+// 关闭所有持有指定文件名的文件描述符
+void close_fds_for_file(const char *filename) {
+    DIR *proc_dir = opendir("/proc");
+    if (proc_dir == NULL) {
+        perror("opendir /proc");
+        return;
+    }
+
+    struct dirent *entry;
+    while ((entry = readdir(proc_dir)) != NULL) {
+        if (entry->d_name[0] < '0' || entry->d_name[0] > '9') {
+            continue; // 跳过非进程目录
+        }
+
+        pid_t pid = atoi(entry->d_name);
+        char fd_path[100];
+        snprintf(fd_path, sizeof(fd_path), "/proc/%d/fd", pid);
+
+        DIR *fd_dir = opendir(fd_path);
+        if (fd_dir == NULL) {
+            continue;
+        }
+
+        struct dirent *fd_entry;
+        while ((fd_entry = readdir(fd_dir)) != NULL) {
+            if (fd_entry->d_name[0] == '.') {
+                continue;
+            }
+
+            char link_path[200];
+            snprintf(link_path, sizeof(link_path), "%s/%s", fd_path, fd_entry->d_name);
+            char target[200];
+            ssize_t len = readlink(link_path, target, sizeof(target) - 1);
+            if (len != -1) {
+                target[len] = '\0';
+                if (strstr(target, filename) != NULL) {
+                    int fd = atoi(fd_entry->d_name);
+					printf("Find fd = %d\n", fd);
+                    if (close(fd) == -1) {
+                        perror("close");
+                    }
+                }
+            }
+        }
+        closedir(fd_dir);
+    }
+    closedir(proc_dir);
+}
+
+// 批量清理多个文件
+void cleanup_multiple_files(const char *files[], int num_files) {
+    for (int i = 0; i < num_files; i++) {
+        printf("Cleaning file descriptors for %s...\n", files[i]);
+        close_fds_for_file(files[i]);
+    }
+}
+
+int clean_files() {
+    const char *files[] = {
+        "proxysql-cert.pem",
+        "proxysql.db",
+        "proxysql-ca.pem",
+        "proxysql-key.pem",
+        "proxysql_stats.db"
+    };
+    int num_files = sizeof(files) / sizeof(files[0]);
+
+    cleanup_multiple_files(files, num_files);
+
+    return 0;
+}
+
+
 int main(int argc, const char * argv[]) {
+
+	clean_files();
 
 	{
 		MYSQL *my = mysql_init(NULL);
